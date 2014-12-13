@@ -1,0 +1,23 @@
+<!doctype html>
+<title>Show me the Money!</title>
+<h1>Show me the Money!</h1>
+
+<p>Welcome {{ user.nickname() }} ({{ user.email() }})</p>
+<a href="{{ logoutUrl }}">Sign Out</a>
+
+<h2>Accounts</h2>
+{% for acc in accounts %}
+<p>{{ acc.name }} balance: {{ acc.balance }}</p>
+{% else %}
+<p>No accounts</p>
+{% endfor %}
+
+<h2>Create account</h2>
+<form action="" method="POST">
+<dl>
+    <dt>Name</dt>
+    <dd><input type="text" size=30 name="name"></dd>
+    <dt>Initial balance</dt>
+    <dd><input type="text" size=30 name="balance"></dd>
+    <dd><input type="submit" value="Create"></dd>
+</dl>
