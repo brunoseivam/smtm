@@ -17,6 +17,7 @@ class Message:
     ERR_NO_ENTITY       = {'error': 'Entity not found'}, 404
     ERR_ENTITY_EXISTS   = {'error': 'Entity already exists'}, 409
     ERR_CONFLICT        = {'error': 'Property conflict'}, 409
+    ERR_MALFORMED       = {'error': 'Malformed request'}, 400
     NO_CONTENT          = None, 204
 
 class NDBPlace(ndb.Model):
@@ -29,7 +30,11 @@ class NDBAccount(ndb.Model):
     name        = ndb.StringProperty(required=True)
 
     def asDict(self):
-        return {'name': self.name}
+        d = {}
+        d['key']  = self.key.urlsafe()
+        d['name'] = self.name
+
+        return d
 
 class NDBCategory(ndb.Model):
     user        = ndb.StringProperty(required=True)
@@ -50,6 +55,40 @@ class NDBTransaction(ndb.Model):
     pair        = ndb.KeyProperty()
     category    = ndb.KeyProperty() # Category or subcategory
 
+    def asDict(self):
+        d = {}
+        d['key']         = self.key.urlsafe()
+        d['date']        = str(self.date)
+        d['amount']      = self.amount
+        d['account']     = self.account.urlsafe()
+
+        if self.payeer is not None:
+            d['payeer']      = self.payeer
+
+        if self.description is not None:
+            d['description'] = self.description
+
+        if self.pair is not None:
+            d['pair']       = self.pair.urlsafe()
+
+        if self.category is not None:
+            d['category']   = self.category.urlsafe()
+
+        return d
+
+def retrieveEntry(keyStr, kinds=None, user=None):
+    key = ndb.Key(urlsafe=keyStr)
+
+    if kinds is not None and key.kind() not in [k.__name__ for k in kinds]:
+        raise Exception
+
+    entry = key.get()
+
+    if user is not None and entry.user != user:
+        raise Exception
+
+    return entry
+
 def authRequired(func):
     @wraps(func)
     def decorated(*args, **kwargs):
@@ -58,27 +97,78 @@ def authRequired(func):
         return func(*args, **kwargs)
     return decorated
 
+class SingleResource(object):
+    @staticmethod
+    def get(key, kind):
+        user = users.get_current_user().user_id()
+        try:
+            return retrieveEntry(key, (kind,), user).asDict()
+        except:
+            return Message.ERR_NO_ENTITY
+
+    @staticmethod
+    def delete(key, kind):
+        user = users.get_current_user().user_id()
+        try:
+            retrieveEntry(key, (kind,), user).key.delete()
+            return Message.NO_CONTENT
+        except:
+            return Message.ERR_NO_ENTITY
+
+class Account(restful.Resource):
+    decorators = [authRequired]
+
+    def get(self, key):
+        return SingleResource.get(key, NDBAccount)
+
+    def delete(self, key):
+        return SingleResource.delete(key, NDBAccount)
+
+    def put(self, key):
+        r = reqparse.RequestParser()
+        r.add_argument('name', type=str, required=True, location='json')
+        args = r.parse_args()
+
+        try:
+            acc = retrieveEntry(key, (NDBAccount,))
+        except:
+            return Message.ERR_NO_ENTITY
+
+        acc.name = args['name']
+        acc.key.put()
+        return acc.asDict(), 200
+
+class Transaction(restful.Resource):
+    decorators = [authRequired]
+
+    def get(self, key):
+        return SingleResource.get(key, NDBTransaction)
+
+    def delete(self, key):
+        return SingleResource.delete(key, NDBTransaction)
+
+class ListResource(object):
+    @staticmethod
+    def get(name, kind):
+        user = users.get_current_user().user_id()
+        entries = kind.query(kind.user==user).fetch()
+        return {name: [e.asDict() for e in entries]}
+
 class AccountList(restful.Resource):
     decorators = [authRequired]
 
     def get(self):
-        user = users.get_current_user().user_id()
-        accounts = NDBAccount.query(NDBAccount.user==user).fetch()
-        return {'accounts': [acc.name for acc in accounts]}
+        return ListResource.get('accounts', NDBAccount)
 
     def post(self):
         r = reqparse.RequestParser()
         r.add_argument('name', type=str, required=True, help='No name provided',
                        location='json')
         r.add_argument('balance', type=int, default=0, location='json')
-
         args = r.parse_args()
+
         user = users.get_current_user().user_id()
         name, balance = args['name'], args['balance']
-
-        q = NDBAccount.query(NDBAccount.user == user, NDBAccount.name == name)
-        if q.get() is not None:
-            return Message.ERR_ENTITY_EXISTS
 
         acc = NDBAccount(user=user, name=name)
         accKey = acc.put()
@@ -91,64 +181,85 @@ class AccountList(restful.Resource):
         t.description   = "Initial balance"
         t.put()
 
-        return acc.asDict(), 201, {'Location':api.url_for(Account, name=name)}
-
-
-class Account(restful.Resource):
-    decorators = [authRequired]
-
-    @staticmethod
-    def retrieve(name):
-        user = users.get_current_user().user_id()
-        q = NDBAccount.query(NDBAccount.user==user,NDBAccount.name==name)
-        return q.get()
-
-    def get(self, name):
-        acc = Account.retrieve(name)
-        return acc.asDict() if acc is not None else Message.ERR_NO_ENTITY
-
-    def put(self, name):
-        r = reqparse.RequestParser()
-        r.add_argument('name', type=str, required=True, help='No name provided',
-                       location='json')
-        args = r.parse_args()
-
-        newName = args['name']
-
-        acc = Account.retrieve(name)
-        if acc is None:
-            return Message.ERR_NO_ENTITY
-
-        if Account.retrieve(newName) is not None:
-            return Message.ERR_CONFLICT
-
-        acc.name = newName
-        acc.key.put()
-        return acc.asDict(), 200
-
-    def delete(self, name):
-        acc = Account.retrieve(name)
-
-        if acc is None:
-            return Message.ERR_NO_ENTITY
-
-        acc.key.delete()
-        return Message.NO_CONTENT
+        return acc.asDict(), 201, \
+                         {'Location':api.url_for(Account, key=accKey.urlsafe())}
 
 class TransactionList(restful.Resource):
     decorators = [authRequired]
 
     def get(self):
-        pass
+        r = reqparse.RequestParser()
+        r.add_argument('account', type=str, required=False, location='args')
+        args = r.parse_args()
 
-class Transaction(restful.Resource):
-    pass
+        if args['account'] is None:
+            return ListResource.get('transactions', NDBTransaction)
 
+        user = users.get_current_user().user_id()
+        query = NDBTransaction.query(NDBTransaction.user==user)
 
-api.add_resource(AccountList, '/api/accounts')
-api.add_resource(Account, '/api/account/<string:name>')
-api.add_resource(TransactionList, 'api.transactions')
+        accKey = args['account']
+        try:
+            acc = retrieveEntry(accKey, (NDBAccount,))
+            query = query.filter(NDBTransaction.account==acc.key)
+        except:
+            return Message.ERR_NO_ENTITY
 
+        transfers = query.fetch()
+        return {'transactions': [t.asDict() for t in transfers]}
+
+    def post(self):
+        r = reqparse.RequestParser()
+        r.add_argument('date',        type=str, required=True,  location='json')
+        r.add_argument('amount',      type=int, required=True,  location='json')
+        r.add_argument('payeer',      type=str, required=False, location='json')
+        r.add_argument('account',     type=str, required=True,  location='json')
+        r.add_argument('description', type=str, required=False, location='json')
+        r.add_argument('pair',        type=str, required=False, location='json')
+        r.add_argument('category',    type=str, required=False, location='json')
+        args = r.parse_args()
+
+        t = NDBTransaction(user=users.get_current_user().user_id())
+
+        # Parse required fields
+
+        try:
+            t.date = datetime.datetime.strptime(args['date'], "%Y-%m-%d").date()
+            t.amount = args['amount']
+            t.account = retrieveEntry(args['account'], (NDBAccount,)).key
+        except:
+            return Message.ERR_MALFORMED
+
+        # Parse string optional fields
+
+        t.payeer = args['payeer']
+        t.description = args['description']
+
+        # Parese key optional fields
+
+        if args['pair'] is not None:
+            try:
+                t.pair = retrieveEntry(args['pair'], (NDBTransaction,)).key
+            except:
+                return Message.ERR_MALFORMED
+
+        if args['category'] is not None:
+            try:
+                t.category = retrieveEntry(args['category'],
+                                           (NDBCategory,NDBSubcategory)).key
+            except:
+                return Message.ERR_MALFORMED
+
+        # Store changes
+
+        tKey = t.put()
+        return t.asDict(), 201, \
+                      {'Location':api.url_for(Transaction, key=tKey.urlsafe())}
+
+api.add_resource(AccountList,       '/api/accounts')
+api.add_resource(Account,           '/api/account/<string:key>')
+api.add_resource(TransactionList,   '/api/transactions')
+api.add_resource(Transaction,       '/api/transaction/<string:key>')
 
 def login_required(func):
     @wraps(func)
